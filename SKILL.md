@@ -18,14 +18,39 @@ Split a large changeset into multiple small, independent PRs — each based on `
 
 ---
 
+## Step -1: Sync Target Branch
+
+Before doing anything else, sync the local target (base) branch with remote and merge it into the current development branch:
+
+```bash
+BASE_BRANCH="${ARGUMENTS:-main}"
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+
+# 1. Fetch latest from remote
+git fetch origin
+
+# 2. Sync local base branch with remote
+git checkout $BASE_BRANCH
+git pull origin $BASE_BRANCH
+
+# 3. Return to development branch and merge in the updated base
+git checkout $CURRENT_BRANCH
+git merge $BASE_BRANCH
+```
+
+**If the merge produces conflicts:** stop immediately, show the conflicting files, and ask the user to resolve them before continuing.
+
+After a clean merge, proceed to Step 0.
+
+---
+
 ## Step 0: Understand Context
 
 ### 0a. Identify the changeset
 
-The base branch is `$ARGUMENTS` if provided, otherwise `main`. Collect **all** changes relative to it — committed and uncommitted together:
+The base branch is `$ARGUMENTS` if provided, otherwise `main` (already set as `BASE_BRANCH` in Step -1). Collect **all** changes relative to it — committed and uncommitted together:
 
 ```bash
-BASE_BRANCH="${ARGUMENTS:-main}"
 git fetch origin $BASE_BRANCH
 
 # All changed files vs base (committed + staged + unstaged combined)
@@ -97,60 +122,71 @@ git diff --name-only $BASE_BRANCH...HEAD | grep '\.py$' | xargs grep -l "^from \
 
 ## Step 1: Analyze & Propose Groups
 
-Using the semantic understanding from Step 0c, group files so that **each group is closed under its dependency graph** — i.e., if file A depends on changed file B, they must be in the same PR (or B must be in an earlier "foundation" PR).
+### Prime directive: every PR must be independently mergeable
 
-Choose the grouping strategy that best fits the changeset:
+**Avoid chaining PRs at all costs.** A chained PR (one that cannot merge until another merges first) is a failure of grouping, not a feature. Reviewers should be able to merge any PR in any order without breaking the repo.
 
-### Strategy A — By Change Type (Horizontal)
-- Refactoring / renames (no logic change)
-- New shared types / interfaces / protos
-- Feature implementation
-- Tests
-- Config / CI / infra
-- Documentation
+Techniques to break a dependency and make a PR stand alone:
+- **Inline the dependency** — copy or duplicate the small shared piece into each PR rather than sharing it; the duplication is temporary and harmless
+- **Use the existing (unmodified) API** — if feature A needs a new method on package X, check whether a slightly different existing method satisfies A; if so, skip the package change and ship A alone
+- **Stub or no-op** — add the new function/type as an empty stub that compiles but does nothing; the feature PR fleshes it out without needing the real implementation first
+- **Bundle when forced** — if two pieces genuinely cannot compile without each other, put them in the same PR rather than chaining
 
-### Strategy B — By Feature (Vertical)
-- Each group is a complete working slice (e.g., frontend + backend + tests for one feature)
+Chaining (PR B must merge before PR A) is only acceptable when all of the above are truly impossible. If you propose a chain, explicitly call it out and explain why independence could not be achieved.
 
-### Strategy C — By Subsystem/Concern
-- Group by domain: auth, database, API, CLI, etc.
+### Default grouping: By Feature (Vertical)
 
-### Strategy D — Foundation + Feature layers
-- PR 0: Shared utilities/types that others depend on
-- PR 1..N: Features that use those utilities (each independent of each other)
+Group by **feature / logical change** — a feature may span multiple folders and packages, and that is correct. Each PR is a complete working slice of one feature.
+
+If a feature must modify an existing shared package, prefer **bundling that package change into the same feature PR** over creating a separate foundation PR that the feature depends on — unless that package change is also needed by a completely separate, unrelated PR.
+
+### Tests and docs always travel with their PR
+
+**Never** split tests or docs into a separate PR. They belong to the PR that introduces the code they cover:
+- Unit/integration tests for feature X → same PR as feature X
+- Inline code comments or doc updates for feature X → same PR as feature X
+- A standalone docs-only PR is only valid when it documents something that already exists in `main` (e.g. a README catch-up, architecture notes) — not new work being split off
+
+### When to use other strategies
+
+| Situation | Strategy |
+|---|---|
+| Pure refactor / rename, no logic change | Standalone PR — no deps possible |
+| Shared change needed by 2+ independent features | Extract to one foundation PR; make feature PRs compile against the stub on `main` until it lands |
+| Completely orthogonal subsystems | Split by subsystem — each is independent |
+| Docs for already-existing functionality | Standalone PR, any order |
 
 **Present the proposed grouping to the user before any git work:**
 
 ```
 ## Proposed Split
 
-| PR # | Branch name          | Files                          | ~Lines | Rationale                        |
-|------|----------------------|-------------------------------|--------|----------------------------------|
-| 1    | refactor/auth-rename | src/auth/*.go                 | 120    | Pure renames, no logic change    |
-| 2    | feat/token-api       | src/api/token.go, tests/...   | 200    | New endpoint + tests (self-cont) |
-| 3    | chore/update-docs    | docs/**, README.md            | 50     | Docs only                        |
+| PR # | Branch name         | Folders / packages touched                              | ~Lines | Independent? | Rationale                                      |
+|------|---------------------|---------------------------------------------------------|--------|--------------|------------------------------------------------|
+| 1    | feat/login-flow     | pkg/auth/, pkg/login/, api/login.go, tests/, docs/login | 320    | YES          | Auth change + tests + docs bundled with feature|
 
 Base branch for all PRs: main
 Build verification: `go build ./...` + `go test ./...`
-Dependency notes: token.go imports auth package — auth rename must land first OR both go in same PR.
+Chained PRs: none
 ```
 
 **Wait for user confirmation or adjustments before proceeding.**
 
 ---
 
-## Step 2: Resolve Cross-PR File Dependencies
+## Step 2: Eliminate Remaining Cross-PR Dependencies
 
-After the user approves the grouping, finalize the dependency plan:
+After the user approves the grouping, audit every pair of proposed PRs for hidden dependencies:
 
-For each pair of proposed PRs (A, B):
-- If any file in A imports a **changed** file in B → A cannot merge before B
-- Options:
-  1. **Merge the two groups** into one PR
-  2. **Make B a foundation PR** — keep it standalone, A targets `main` but reviewer knows to merge B first (document ordering in PR body)
-  3. **Extract the shared change** into its own tiny foundation PR that both depend on
+For each pair (A, B) where a file in A imports a changed file in B:
+1. **Bundle** — move the dependency into A (preferred)
+2. **Stub** — add a no-op version of the dependency to `main` via a tiny standalone PR that has zero dependencies itself, then both A and B build against the stub independently
+3. **Inline** — duplicate the small shared piece in each PR
+4. **Chain as last resort** — only if 1–3 are genuinely impossible; document exactly why
 
-After resolving, confirm final grouping is dependency-clean (each PR compiles on its own against `main`).
+Goal: the "Chained PRs" line in the summary table above should read **none**. If any chain remains after exhausting options 1–3, flag it clearly to the user before proceeding.
+
+After resolving, confirm every PR compiles independently against `main`.
 
 ---
 
@@ -167,6 +203,11 @@ git checkout -b <branch-name> origin/$BASE_BRANCH
 Branch naming: `<type>/<short-description>` — e.g., `refactor/auth-rename`, `feat/token-api`
 
 ### 3b. Apply the changes for this group
+
+**Commit message rules:**
+- Write a contextual message that describes what the user built and why
+- Use the format `<type>(<scope>): <description>` reflecting the actual change
+- **Never** append `Co-Authored-By` or any Claude attribution — the user is the author
 
 **Option A — Checkout specific files from the source branch** (most common):
 ```bash
@@ -185,7 +226,7 @@ git cherry-pick <commit-sha>
 git diff $BASE_BRANCH...HEAD -- path/to/file > /tmp/partial.patch
 git apply /tmp/partial.patch
 git add .
-git commit -m "<message>"
+git commit -m "<type>(<scope>): <description>"
 ```
 
 ### 3c. Verify build SUCCESS — mandatory before pushing
@@ -231,11 +272,37 @@ echo "Branch <branch-name> pushed — build verified green."
 
 ## Step 4: Create the PRs
 
+### 4a. Detect the repository's PR template
+
+Before writing the PR body, check for an existing PR description template:
+
+```bash
+# Common template locations
+cat .github/pull_request_template.md 2>/dev/null \
+  || cat .github/PULL_REQUEST_TEMPLATE.md 2>/dev/null \
+  || cat docs/pull_request_template.md 2>/dev/null \
+  || cat PULL_REQUEST_TEMPLATE.md 2>/dev/null
+```
+
+**If a template is found:** use it as the base structure for every PR body. Fill in all its sections with content appropriate to each PR — do not skip or remove any sections the template defines.
+
+**If no template is found:** fall back to the default structure below.
+
+### 4b. Raise the PR
+
+**PR title rules:**
+- Max 72 characters
+- Format: `<type>(<scope>): <what changed>` — no filler words, no trailing punctuation
+- Describe the change, not the process (e.g. `feat(auth): add token refresh` not `Split PR 2 of 3 - implement token refresh logic for auth module`)
+
 ```bash
 gh pr create \
   --base $BASE_BRANCH \
-  --title "<type>(<scope>): <short description>" \
+  --title "<type>(<scope>): <what changed>" \
   --body "$(cat <<'EOF'
+<PR body — either the repo template filled in, or the default below>
+
+--- DEFAULT (use only when no repo template exists) ---
 ## Summary
 - <bullet 1>
 - <bullet 2>

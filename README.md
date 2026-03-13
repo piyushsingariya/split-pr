@@ -38,6 +38,14 @@ After any of these, your skills directory should look like:
 
 Claude Code picks up skills automatically — no restart needed.
 
+**Updating the skill** (if installed via clone or copy):
+
+```bash
+cd ~/.claude/skills/split-pr && git pull
+```
+
+If installed via symlink, just pull in your local clone — the symlink keeps it live automatically.
+
 ## Usage
 
 From inside any git repository, invoke the skill in Claude Code:
