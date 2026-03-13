@@ -4,19 +4,39 @@ A Claude Code skill that splits a large PR or set of uncommitted changes into mu
 
 ## Installation
 
-1. Copy `SKILL.md` into your Claude Code skills directory:
+Skills in Claude Code must live in a **named directory** inside `~/.claude/skills/`. The directory name becomes the `/command` name, and `SKILL.md` inside it is the entrypoint. The `references/` folder must also be present because `SKILL.md` links to those files.
 
-   ```bash
-   cp SKILL.md ~/.claude/skills/split-pr.md
-   ```
+**Option A — Copy the whole directory:**
 
-   Or symlink it if you want to keep it in sync with this repo:
+```bash
+cp -r /path/to/this/repo ~/.claude/skills/split-pr
+```
 
-   ```bash
-   ln -s "$(pwd)/SKILL.md" ~/.claude/skills/split-pr.md
-   ```
+**Option B — Clone directly into the skills directory:**
 
-2. That's it. Claude Code picks up skills automatically from `~/.claude/skills/`.
+```bash
+git clone https://github.com/piyushsingariya/split-pr ~/.claude/skills/split-pr
+```
+
+**Option C — Symlink (keeps it in sync with your local clone):**
+
+```bash
+ln -s "$(pwd)" ~/.claude/skills/split-pr
+```
+
+After any of these, your skills directory should look like:
+
+```
+~/.claude/skills/
+└── split-pr/
+    ├── SKILL.md
+    └── references/
+        ├── build-verification.md
+        ├── dependency-resolution.md
+        └── splitting-strategies.md
+```
+
+Claude Code picks up skills automatically — no restart needed.
 
 ## Usage
 
